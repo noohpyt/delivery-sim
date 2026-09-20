@@ -1,4 +1,4 @@
-// M1 端到端验证：真实驾驶 + 完整接单→取餐→送达流程，断言收入变化
+// 端到端验证：真实驾驶 + 完整接单→规划→取餐→送达流程，断言收入变化
 // 用法：node test/e2e.mjs [milestone]
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
@@ -80,20 +80,40 @@ try {
   const h1 = (await page.evaluate(() => window.__game.rider())).heading;
   log(h1 > h0 + 0.05, 'A steers left', `Δheading=${(h1 - h0).toFixed(2)}`);
 
-  // 3) 完整订单流程：生成→接单→取餐→送达→收入增加
+  // 3) 接单 → 送前规划（M2）
   await page.evaluate(() => { window.__game.spawnOffer(); });
   const money0 = await page.evaluate(() => window.__game.money());
   await page.evaluate(() => window.__game.accept(0));
-  let target = await page.evaluate(() => window.__game.targetPos());
-  log(target?.phase === 'pickup', 'offer accepted, target = pickup');
-  await page.screenshot({ path: path.join(shots, `${milestone}-02-pickup-marker.png`) });
+  await page.waitForTimeout(200);
+  log((await page.evaluate(() => window.__game.state())) === 'plan', 'accepting enters PLAN state');
+  const planInfo = await page.evaluate(() => window.__game.planInfo());
+  log(planInfo.totalEtaSec > 0 && planInfo.stops === 2, 'plan has ETA + 2 stops', JSON.stringify(planInfo));
+  await page.screenshot({ path: path.join(shots, `${milestone}-02-plan.png`) });
 
+  // 小地图存在
+  log(await page.evaluate(() => !!document.querySelector('#minimap')), 'minimap canvas exists');
+
+  // 确认出发
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+  log((await page.evaluate(() => window.__game.state())) === 'ride', 'Enter confirms plan → ride');
+  log(await page.evaluate(() => window.__game.routeVisible()), 'auto-nav route ribbon visible');
+  await page.screenshot({ path: path.join(shots, `${milestone}-03-nav.png`) });
+
+  // 自动导航开关
+  await page.evaluate(() => window.__game.setAutoNav(false));
+  log(!(await page.evaluate(() => window.__game.routeVisible())), 'autoNav off hides route');
+  await page.evaluate(() => window.__game.setAutoNav(true));
+
+  // 4) 取餐 → 送达 → 收入增加
+  let target = await page.evaluate(() => window.__game.targetPos());
+  log(target?.phase === 'pickup', 'next stop = pickup');
   await page.evaluate((t) => window.__game.teleport(t.x, t.z), target);
   await page.waitForTimeout(150);
   await page.keyboard.press('KeyE');
   await page.waitForTimeout(150);
   target = await page.evaluate(() => window.__game.targetPos());
-  log(target?.phase === 'deliver', 'E picks up, target = deliver');
+  log(target?.phase === 'deliver', 'E picks up, next stop = deliver');
 
   await page.evaluate((t) => window.__game.teleport(t.x, t.z), target);
   await page.waitForTimeout(150);
@@ -103,9 +123,23 @@ try {
   const stats = await page.evaluate(() => window.__game.stats());
   log(money1 > money0, 'delivery pays out', `¥${money0} → ¥${money1.toFixed(1)}`);
   log(stats.delivered === 1, 'stats.delivered = 1');
-  await page.screenshot({ path: path.join(shots, `${milestone}-03-delivered.png`) });
+  await page.screenshot({ path: path.join(shots, `${milestone}-04-delivered.png`) });
 
-  // 4) 时钟推进
+  // 5) 多单规划：两单 → 4 个停靠点
+  await page.evaluate(() => { window.__game.spawnOffer(); window.__game.spawnOffer(); });
+  await page.waitForTimeout(100);
+  await page.evaluate(() => { window.__game.accept(0); });
+  await page.waitForTimeout(100);
+  await page.keyboard.press('Enter'); // 确认第一单规划
+  await page.waitForTimeout(100);
+  await page.evaluate(() => { window.__game.accept(0); });
+  await page.waitForTimeout(150);
+  const multi = await page.evaluate(() => window.__game.planInfo());
+  log(multi.stops === 4 && multi.unreachable === 0, 'multi-order plan: 4 stops, all reachable', JSON.stringify(multi));
+  await page.screenshot({ path: path.join(shots, `${milestone}-05-multiplan.png`) });
+  await page.keyboard.press('Enter'); // 回到骑行
+
+  // 6) 时钟推进
   const t0 = await page.evaluate(() => window.__game.minutes());
   await page.waitForTimeout(1000);
   const t1 = await page.evaluate(() => window.__game.minutes());
