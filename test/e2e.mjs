@@ -8,7 +8,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const milestone = process.argv[2] || 'm4';
+const milestone = process.argv[2] || 'm6';
+const mode = process.argv[3] || 'dev'; // dev | dist
 const shots = path.join(root, 'docs', 'shots');
 fs.mkdirSync(shots, { recursive: true });
 
@@ -17,6 +18,9 @@ const log = (ok, name, extra = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? ' — ' + extra : ''}`);
   if (!ok) failures.push(name);
 };
+
+const PORT = mode === 'dist' ? 4173 : 5173;
+const BASE = `http://localhost:${PORT}/`;
 
 function waitForServer(url, timeoutMs = 30000) {
   const start = Date.now();
@@ -32,7 +36,10 @@ function waitForServer(url, timeoutMs = 30000) {
   });
 }
 
-const server = spawn(process.execPath, [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js'), '--port', '5173', '--strictPort'], { cwd: root, stdio: 'pipe' });
+const serverArgs = mode === 'dist'
+  ? ['preview', '--port', String(PORT), '--strictPort']
+  : ['--port', String(PORT), '--strictPort'];
+const server = spawn(process.execPath, [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js'), ...serverArgs], { cwd: root, stdio: 'pipe' });
 server.stderr.on('data', (d) => process.stderr.write(d));
 const killServer = () => {
   try {
@@ -43,7 +50,7 @@ const killServer = () => {
 
 let browser;
 try {
-  await waitForServer('http://localhost:5173/');
+  await waitForServer(BASE);
   const chromeExe = process.env.LOCALAPPDATA + '/ms-playwright/chromium-1243/chrome-win64/chrome.exe';
   const launchOpts = { args: ['--enable-unsafe-swiftshader', '--headless=new'] };
   if (fs.existsSync(chromeExe)) launchOpts.executablePath = chromeExe;
@@ -54,12 +61,25 @@ try {
   page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
   const G = (expr) => page.evaluate(new Function('return window.__game.' + expr));
 
-  await page.goto('http://localhost:5173/', { waitUntil: 'load' });
+  await page.goto(BASE, { waitUntil: 'load' });
   const ready = await page.waitForFunction(() => window.__game?.ready, null, { timeout: 15000 }).catch(() => null);
-  log(!!ready, 'game boots (window.__game ready)');
+  log(!!ready, `game boots on ${mode} (window.__game ready)`);
 
-  // === M4 叙事层：产品经理开场 ===
-  log((await G('state()')) === 'pm', 'boots into PM phase');
+  // === M6 标题与帮助 ===
+  log((await G('state()')) === 'title', 'boots into title screen');
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: path.join(shots, `${milestone}-00-title.png`) });
+  await page.keyboard.press('KeyH');
+  await page.waitForTimeout(300);
+  const helpShown = await page.evaluate(() => document.getElementById('overlay').textContent.includes('核心循环'));
+  log(helpShown, 'help screen opens with H');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  const helpClosed = await page.evaluate(() => !document.getElementById('overlay').textContent.includes('核心循环'));
+  log(helpClosed, 'help closes with Esc, title intact');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+  log((await G('state()')) === 'pm', 'Enter starts game → PM phase');
   await page.waitForTimeout(8500); // 等开场文案 + 第一张决策卡
   await page.screenshot({ path: path.join(shots, `${milestone}-01-pm.png`) });
   const pm0 = await G('pmInfo()');
@@ -85,6 +105,15 @@ try {
   await page.waitForTimeout(300);
   log((await G('state()')) === 'ride', 'shift selected → ride');
   await page.evaluate(() => window.__game.eventsTimer(9999));
+
+  // === M6 暂停菜单 ===
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  log((await G('state()')) === 'pause', 'Esc pauses during ride');
+  await page.screenshot({ path: path.join(shots, `${milestone}-00-pause.png`) });
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  log((await G('state()')) === 'ride', 'Esc resumes');
 
   await page.waitForTimeout(1500);
   await page.screenshot({ path: path.join(shots, `${milestone}-03-city.png`) });
@@ -220,6 +249,37 @@ try {
   await page.evaluate(() => window.__game.setDelivered(5));
   const know = await G('knowledge()');
   log(know.includes('pre_order') && know.includes('merge_orders'), 'knowledge unlocked by deliveries', know.join(','));
+
+  // === M6 异常处理 ===
+  // 超时丢单：接一个单然后 20 倍速拖到超时 45 游戏秒
+  await page.evaluate(() => window.__game.spawnOffer());
+  await page.evaluate(() => window.__game.accept(0));
+  await page.waitForTimeout(150);
+  await page.evaluate(() => window.__game.confirmPlan());
+  await page.waitForTimeout(150);
+  const failed0 = (await G('stats()')).failed;
+  await page.evaluate(() => { window.__game.setMinutes(16.5 * 60); window.__game.setTimeScale(900); });
+  await page.waitForTimeout(2500);
+  await page.evaluate(() => window.__game.setTimeScale(30));
+  const failed1 = (await G('stats()')).failed;
+  log(failed1 > failed0, 'overdue order fails with penalty', `failed ${failed0} → ${failed1}`);
+  // 无路可走：封死送达点 → 规划报不可达 → X 放弃
+  await page.evaluate(() => window.__game.debugUnreachableOffer());
+  await page.waitForTimeout(150);
+  let pi = await G('planInfo()');
+  log(pi.unreachable >= 1, 'unreachable stop detected in plan', JSON.stringify(pi));
+  await page.evaluate(() => window.__game.spawnOffer());
+  await page.evaluate(() => window.__game.accept(0));
+  await page.waitForTimeout(200);
+  log((await G('state()')) === 'plan', 'plan state for drop test');
+  const failedBefore = (await G('stats()')).failed;
+  await page.keyboard.press('KeyX');
+  await page.waitForTimeout(200);
+  pi = await G('planInfo()');
+  const failedAfter = (await G('stats()')).failed;
+  log(pi.unreachable === 0 && failedAfter > failedBefore, 'X drops unreachable order', `unreachable=${pi.unreachable} failed ${failedBefore}→${failedAfter}`);
+  await page.keyboard.press('Enter'); // 确认剩余规划
+  await page.waitForTimeout(150);
 
   // === 日终结算（M4 版内容断言） ===
   await page.evaluate(() => window.__game.setMinutes(24 * 60 + 0.01));

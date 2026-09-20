@@ -18,7 +18,7 @@ import { PMPhase } from '../systems/pmPhase.js';
 import { HUD } from '../ui/hud.js';
 import { Minimap } from '../ui/minimap.js';
 import { PlanView } from '../ui/planview.js';
-import { ShiftSelect, DayEnd } from '../ui/screens.js';
+import { ShiftSelect, DayEnd, TitleView, HelpView, PauseMenu } from '../ui/screens.js';
 import { LayoffView } from '../ui/story.js';
 import { Particles } from '../fx/particles.js';
 
@@ -107,14 +107,69 @@ export class Game {
       this.renderer.setSize(innerWidth, innerHeight);
     });
 
-    // 开场：产品经理阶段
-    this.state = 'pm';
+    // 标题界面 → PM 开场
+    this.state = 'title';
     this.camera.position.set(0, 330, 80);
     this.camera.lookAt(0, 0, 0);
-    this.pmPhase = new PMPhase(this);
-    this.pmPhase.start(() => this.enterLayoff());
+    this.pmPhase = null;
+    this.layoff = null;
+    this.showTitle();
+
+    // 页面失焦自动暂停
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && (this.state === 'ride' || this.state === 'plan')) this.pause();
+    });
 
     this.installDebug();
+  }
+
+  showTitle() {
+    this.state = 'title';
+    this.titleView = new TitleView(this.overlayRoot, {
+      onStart: () => this.startPM(),
+      onHelp: () => {
+        this.titleView.suspend();
+        new HelpView(this.overlayRoot, () => this.titleView?.resume());
+      },
+    });
+  }
+
+  startPM() {
+    this.titleView = null;
+    this.state = 'pm';
+    this.pmPhase = new PMPhase(this);
+    this.pmPhase.start(() => this.enterLayoff());
+  }
+
+  pause() {
+    if (this.state !== 'ride' && this.state !== 'plan') return;
+    this.prevState = this.state;
+    this.state = 'pause';
+    this.audio.engine(0);
+    new PauseMenu(this.overlayRoot, {
+      onResume: () => { this.state = this.prevState; this.input.pressed.clear(); },
+      onRestartDay: () => { this.input.pressed.clear(); this.restartDay(); },
+      onQuitTitle: () => location.reload(),
+    });
+  }
+
+  restartDay() {
+    this.orders.active.length = 0;
+    this.orders.offers.length = 0;
+    this.orders.failedQueue.length = 0;
+    this.orders.stats.delivered = 0;
+    this.orders.stats.late = 0;
+    this.orders.stats.failed = 0;
+    this.events = new EventSystem(this);
+    this.events.onToast = (t, c) => this.hud.toast(t, c);
+    this.net.clearEdges();
+    this.money = this.dayStartMoney;
+    this.rider.teleport(0, 0, Math.PI);
+    this.rider.battery = 100;
+    this.workday.startShift(this.shift.start);
+    this.replan();
+    this.state = 'ride';
+    this.hud.toast('🔄 重新开始今天', '#00e5ff');
   }
 
   enterLayoff() {
@@ -154,6 +209,7 @@ export class Game {
       dayMoney: this.money - this.dayStartMoney,
       delivered: this.orders.stats.delivered,
       late: this.orders.stats.late,
+      failed: this.orders.stats.failed,
       events: this.events.log,
       knowledgeIds: [...this.knowledge.unlocked],
       odoKm: this.odoDayM / 1000,
@@ -249,6 +305,10 @@ export class Game {
   }
 
   update(dt) {
+    if (this.state === 'title' || this.state === 'pause') {
+      this.input.endFrame();
+      return;
+    }
     if (this.state === 'pm') {
       this.pmPhase.update(dt);
       if (this.input.justPressed('Digit1')) this.pmPhase.decide(0);
@@ -272,9 +332,19 @@ export class Game {
         this.updateRibbon();
         this.planView.render(this.net, this.rider, this.plan, this.autoNav);
       }
+      if (this.input.justPressed('KeyX') && this.plan.unreachableOrders?.length) {
+        for (const o of this.plan.unreachableOrders) this.orders.dropOrder(o, 'unreachable');
+        this.hud.toast('已放弃不可达订单（-¥2/单）', '#ff8fa3');
+        this.money = Math.max(0, this.money - 2 * this.plan.unreachableOrders.length);
+        this.replan();
+        this.planView.render(this.net, this.rider, this.plan, this.autoNav);
+      }
+      if (this.input.justPressed('Escape')) { this.pause(); this.input.endFrame(); return; }
       this.input.endFrame();
       return; // 世界冻结
     }
+
+    if (this.input.justPressed('Escape')) { this.pause(); this.input.endFrame(); return; }
 
     this.workday.update(dt);
     if (this.workday.isOver) { this.endDay(); this.input.endFrame(); return; }
@@ -322,6 +392,15 @@ export class Game {
     });
     this.odoDayM += this.rider.odoM - odo0;
     this.orders.update(dt, dtGameSec, this.workday.isPeak);
+
+    // 超时失败订单：扣款 + 提示 + 重规划
+    while (this.orders.failedQueue.length) {
+      const f = this.orders.failedQueue.shift();
+      this.money = Math.max(0, this.money - 3);
+      this.hud.toast(`❌ 订单${f.reason === 'timeout' ? '超时' : ''}失败 -¥3`, '#ff8fa3');
+      this.audio.fail();
+      this.replan();
+    }
 
     // 粒子：冲刺尾焰 / 碰撞火花 / 落地尘土 / 雨丝
     this.trailT -= dt;
@@ -433,6 +512,27 @@ export class Game {
       riderY: () => ({ y: +g.rider.y.toFixed(2), airborne: g.rider.airborne, onSidewalk: g.rider.onSidewalk }),
       particles: () => g.particles.count(),
       hintText: () => document.getElementById('hud-hint')?.textContent || '',
+      // M6
+      pause: () => g.pause(),
+      debugUnreachableOffer: () => {
+        // 造一个送达点被完全封死的进行中订单，验证"无路可走"兜底
+        const net = g.net;
+        const ni = 4, nj = 4;
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const i1 = ni + di, j1 = nj + dj;
+          if (i1 < 0 || j1 < 0 || i1 >= net.n || j1 >= net.n) continue;
+          net.setEdge(ni, nj, i1, j1, { blocked: true });
+        }
+        const node = net.nodes[net.idx(ni, nj)];
+        g.orders.active.push({
+          id: g.orders.seq++, restaurant: '测试商家', phase: 'deliver',
+          pickupPos: new THREE.Vector3(node.x, 0, node.z),
+          deliverPos: new THREE.Vector3(node.x, 0, node.z),
+          distM: 0, reward: 5, limitSec: 900, remainSec: 900, tag: '🧪',
+        });
+        g.replan();
+        return true;
+      },
     };
   }
 }

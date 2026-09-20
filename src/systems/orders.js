@@ -46,6 +46,7 @@ export class OrderSystem {
       this.ghosts.push(g);
     }
     this.stats = { delivered: 0, late: 0, failed: 0, earned: 0 };
+    this.failedQueue = []; // 待 game 取走扣款
     this.slackScale = 1; // M3 难度系统会改它
   }
 
@@ -78,7 +79,11 @@ export class OrderSystem {
       this.spawnT = isPeak ? O.offerInterval * 0.5 : O.offerInterval; // 高峰单更密
       this.spawnOffer(isPeak);
     }
-    for (const o of this.active) o.remainSec -= dtGameSec;
+    for (const o of this.active) {
+      o.remainSec -= dtGameSec;
+      // 超时 45 游戏秒仍未送达 → 订单失败
+      if (o.remainSec < -45) this.dropOrder(o, 'timeout');
+    }
     const t = performance.now() / 1000;
     if (this.marker.visible) {
       this.marker.children[0].position.y = 8 + Math.sin(t * 3) * 0.8;
@@ -113,7 +118,7 @@ export class OrderSystem {
         const len = net.pathLength(pts);
         if (!best || len < best.len) best = { order: o, kind, pos, pts, len };
       }
-      if (!best) return { stops, legs, totalEtaSec: total, unreachable: remaining.size };
+      if (!best) return { stops, legs, totalEtaSec: total, unreachable: remaining.size, unreachableOrders: [...remaining] };
       stops.push({ order: best.order, kind: best.kind, pos: best.pos });
       const etaSec = (best.len / O.refSpeed) * BALANCE.timeScale;
       legs.push({
@@ -125,7 +130,17 @@ export class OrderSystem {
       if (best.kind === 'pickup') simPhase.set(best.order, 'deliver');
       else remaining.delete(best.order);
     }
-    return { stops, legs, totalEtaSec: total, unreachable: 0 };
+    return { stops, legs, totalEtaSec: total, unreachable: 0, unreachableOrders: [] };
+  }
+
+  // 放弃/失败订单：从进行中移除并计失败
+  dropOrder(order, reason = 'drop') {
+    const i = this.active.indexOf(order);
+    if (i < 0) return false;
+    this.active.splice(i, 1);
+    this.stats.failed++;
+    this.failedQueue.push({ order, reason });
+    return true;
   }
 
   // 返回交互结果描述，未在交互范围返回 null；ctx = { mods, workdayMin }

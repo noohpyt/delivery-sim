@@ -19,7 +19,8 @@ export class PlanView {
           <div id="plan-nav" style="margin-top:8px;font-size:13px;color:#7dffb2;"></div>
           <div style="margin-top:16px;font-size:13px;color:#9fc6e0;line-height:2;">
             <b>[Enter]</b> 确认出发<br>
-            <b>[N]</b> 切换自动导航
+            <b>[N]</b> 切换自动导航<br>
+            <b>[X]</b> 放弃不可达订单（若有）
           </div>
         </div>
       </div>`;
