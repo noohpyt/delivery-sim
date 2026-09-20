@@ -3,9 +3,11 @@ export class HUD {
   constructor(root) {
     root.innerHTML = `
       <div id="hud-status" class="hud-panel">
-        <div>🕐 <span id="hud-time">--:--</span></div>
+        <div>🕐 <span id="hud-time">--:--</span> <span id="hud-peak" style="color:#ffd166;font-size:12px;"></span></div>
         <div class="money">¥ <span id="hud-money">0.0</span></div>
-        <div style="font-size:12px;color:#7fb8d8">已送 <span id="hud-count">0</span> 单 · 超时 <span id="hud-late">0</span></div>
+        <div style="font-size:12px;color:#7fb8d8">已送 <span id="hud-count">0</span> 单 · 超时 <span id="hud-late">0</span> · 🧠<span id="hud-know">0</span></div>
+        <div style="margin-top:4px;font-size:12px;">🔋 <span style="display:inline-block;width:90px;height:8px;background:#12203a;border-radius:4px;vertical-align:middle;"><span id="hud-batt" style="display:block;height:100%;width:100%;background:#7dffb2;border-radius:4px;"></span></span></div>
+        <div id="hud-events" style="margin-top:4px;font-size:12px;color:#ff8fa3;"></div>
       </div>
       <div id="hud-orders" class="hud-panel"><b>进行中订单</b><div id="hud-order-list"><div style="color:#5b7a94">暂无，按 Enter 接单</div></div></div>
       <div id="hud-offers" class="hud-panel"><b>📡 订单推送</b><div id="hud-offer-list"></div></div>
@@ -20,6 +22,10 @@ export class HUD {
       offerList: document.getElementById('hud-offer-list'),
       prompt: document.getElementById('hud-prompt'),
       speed: document.getElementById('hud-speed-v'),
+      batt: document.getElementById('hud-batt'),
+      peak: document.getElementById('hud-peak'),
+      know: document.getElementById('hud-know'),
+      events: document.getElementById('hud-events'),
     };
     this.lastKey = '';
   }
@@ -35,20 +41,30 @@ export class HUD {
       workday.hhmm, money.toFixed(1), orders.stats.delivered, orders.stats.late,
       orders.offers.map((o) => o.id).join(','),
       orders.active.map((o) => `${o.id}:${o.phase}:${Math.ceil(o.remainSec)}`).join(','),
-      Math.round(rider.speed * 3.6),
+      Math.round(rider.speed * 3.6), Math.round(rider.battery), workday.isPeak ? 1 : 0,
+      game.knowledge.unlocked.size,
+      game.events.active.map((a) => a.def.id + Math.ceil(a.remainSec)).join(','),
     ].join('|');
     if (key === this.lastKey) return; // 无变化不碰 DOM
     this.lastKey = key;
 
     this.el.time.textContent = workday.hhmm;
+    this.el.peak.textContent = workday.isPeak ? '🔥高峰' : '';
     this.el.money.textContent = money.toFixed(1);
     this.el.count.textContent = orders.stats.delivered;
     this.el.late.textContent = orders.stats.late;
+    this.el.know.textContent = game.knowledge.unlocked.size;
     this.el.speed.textContent = Math.round(Math.abs(rider.speed) * 3.6);
+    const b = Math.round(rider.battery);
+    this.el.batt.style.width = b + '%';
+    this.el.batt.style.background = b > 40 ? '#7dffb2' : b > 15 ? '#ffd166' : '#ff4d6d';
+    this.el.events.innerHTML = game.events.active
+      .map((a) => `${a.def.icon} ${a.def.name} ${Math.ceil(a.remainSec)}s`)
+      .join('　');
 
     this.el.offerList.innerHTML = orders.offers.length
       ? orders.offers.map((o, i) =>
-          `<div class="offer"><span class="key">[${i === 0 ? 'Enter' : ''}]</span> ${o.restaurant} → 顾客 · ${(o.distM / 1000).toFixed(1)}km · ¥${o.reward} · 限${this.fmtRemain(o.limitSec)}</div>`
+          `<div class="offer">${o.tag || ''}<span class="key">[${i === 0 ? 'Enter' : ''}]</span> ${o.restaurant} → 顾客 · ${(o.distM / 1000).toFixed(1)}km · ¥${o.reward} · 限${this.fmtRemain(o.limitSec)}</div>`
         ).join('')
       : '<div style="color:#5b7a94">等待平台派单…</div>';
 

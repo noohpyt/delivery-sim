@@ -49,12 +49,14 @@ export class OrderSystem {
     this.slackScale = 1; // M3 难度系统会改它
   }
 
-  spawnOffer() {
+  spawnOffer(isPeak = false) {
     if (this.offers.length >= O.maxOffers) return null;
     const rest = pick(this.rng, this.city.restaurants);
     const cust = pick(this.rng, this.city.customerSpots);
     const distM = Math.max(120, rest.pos.distanceTo(cust) * 1.35); // 估算绕路系数，兜底最小距离
-    const reward = Math.round((O.baseFee + (distM / 1000) * O.perKm) * 10) / 10;
+    let reward = O.baseFee + (distM / 1000) * O.perKm;
+    if (isPeak) reward *= 1.35; // 高峰加价
+    reward = Math.round(reward * 10) / 10;
     const limitSec = Math.max(O.minLimitSec, (distM / O.refSpeed) * O.slack * this.slackScale * BALANCE.timeScale);
     const offer = {
       id: this.seq++,
@@ -64,16 +66,17 @@ export class OrderSystem {
       distM: Math.round(distM),
       reward,
       limitSec,
+      tag: isPeak ? '🔥高峰' : '',
     };
     this.offers.push(offer);
     return offer;
   }
 
-  update(dtReal, dtGameSec) {
+  update(dtReal, dtGameSec, isPeak = false) {
     this.spawnT -= dtReal;
     if (this.spawnT <= 0) {
-      this.spawnT = O.offerInterval;
-      this.spawnOffer();
+      this.spawnT = isPeak ? O.offerInterval * 0.5 : O.offerInterval; // 高峰单更密
+      this.spawnOffer(isPeak);
     }
     for (const o of this.active) o.remainSec -= dtGameSec;
     const t = performance.now() / 1000;
@@ -125,25 +128,33 @@ export class OrderSystem {
     return { stops, legs, totalEtaSec: total, unreachable: 0 };
   }
 
-  // 返回交互结果描述，未在交互范围返回 null
-  tryInteract(pos, audio) {
+  // 返回交互结果描述，未在交互范围返回 null；ctx = { mods, workdayMin }
+  tryInteract(pos, audio, ctx = {}) {
+    const mods = ctx.mods || {};
     for (const o of this.active) {
       const target = o.phase === 'pickup' ? o.pickupPos : o.deliverPos;
       if (pos.distanceTo(target) > O.pickupRadius) continue;
       if (o.phase === 'pickup') {
         o.phase = 'deliver';
+        if (mods.pickupBonusSec) o.remainSec += mods.pickupBonusSec; // 提前取餐
         audio?.pickup();
         return { kind: 'pickup', order: o };
       }
       const onTime = o.remainSec > 0;
-      const pay = onTime ? o.reward * (1 + O.onTimeBonus) : o.reward * O.lateFactor;
+      let pay = onTime ? o.reward * (1 + O.onTimeBonus) : o.reward * O.lateFactor;
+      // 合并顺路单：60 游戏秒内连续送达加成
+      const nowMin = ctx.workdayMin ?? 0;
+      const combo = mods.comboBonus > 0 && this.lastDeliverMin != null && (nowMin - this.lastDeliverMin) < 1;
+      if (combo && onTime) pay *= 1 + mods.comboBonus;
+      pay *= mods.subsidy || 1; // 雨天补贴等
       const rounded = Math.round(pay * 10) / 10;
+      this.lastDeliverMin = nowMin;
       this.stats.delivered++;
       if (!onTime) this.stats.late++;
       this.stats.earned += rounded;
       this.active.splice(this.active.indexOf(o), 1);
       audio?.deliver();
-      return { kind: 'deliver', order: o, pay: rounded, onTime };
+      return { kind: 'deliver', order: o, pay: rounded, onTime, combo };
     }
     return null;
   }

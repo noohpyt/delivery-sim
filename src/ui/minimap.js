@@ -4,7 +4,7 @@ import { MAP } from '../config/map.js';
 const half = (MAP.blocks * MAP.blockSize) / 2;
 const worldSize = half * 2 + MAP.blockSize;
 
-export function drawMap(ctx, size, { net, rider, plan, pulse = 0 }) {
+export function drawMap(ctx, size, { net, rider, plan, pulse = 0, chargers = [] }) {
   const s = size / worldSize;
   const mx = (x) => (x + worldSize / 2) * s;
   const mz = (z) => (z + worldSize / 2) * s;
@@ -74,6 +74,13 @@ export function drawMap(ctx, size, { net, rider, plan, pulse = 0 }) {
     });
   }
 
+  // 充电点
+  for (const c of chargers) {
+    ctx.fillStyle = '#7dffb2';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('⚡', mx(c.px ?? c.x) - 5, mz(c.pz ?? c.z) + 3);
+  }
+
   // 骑手（三角箭头，按车头朝向旋转）
   if (rider) {
     const x = mx(rider.x), y = mz(rider.z);
@@ -103,8 +110,8 @@ export class Minimap {
     this.ctx = this.canvas.getContext('2d');
     this.frame = 0;
   }
-  update(net, rider, plan) {
+  update(net, rider, plan, chargers = []) {
     this.frame++;
-    drawMap(this.ctx, 190, { net, rider, plan, pulse: (Math.sin(this.frame * 0.12) + 1) / 2 });
+    drawMap(this.ctx, 190, { net, rider, plan, pulse: (Math.sin(this.frame * 0.12) + 1) / 2, chargers });
   }
 }

@@ -4,14 +4,18 @@ import { BALANCE } from '../config/balance.js';
 import { Input } from './input.js';
 import { GameAudio } from './audio.js';
 import { buildCity } from '../world/city.js';
-import { setupLighting } from '../world/lighting.js';
+import { DayNight } from '../world/lighting.js';
 import { Rider } from '../entities/rider.js';
 import { OrderSystem } from '../systems/orders.js';
 import { RoadNetwork } from '../systems/routing.js';
-import { Workday } from '../systems/workday.js';
+import { Workday, SHIFTS } from '../systems/workday.js';
+import { EventSystem } from '../systems/events.js';
+import { KnowledgeSystem } from '../systems/knowledge.js';
+import { DifficultySystem } from '../systems/difficulty.js';
 import { HUD } from '../ui/hud.js';
 import { Minimap } from '../ui/minimap.js';
 import { PlanView } from '../ui/planview.js';
+import { ShiftSelect, DayEnd } from '../ui/screens.js';
 
 export class Game {
   constructor(container, hudRoot) {
@@ -25,7 +29,7 @@ export class Game {
     this.camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 1200);
     this.camOffset = new THREE.Vector3(0, BALANCE.camera.height, BALANCE.camera.dist);
 
-    this.lighting = setupLighting(this.scene);
+    this.lighting = new DayNight(this.scene);
     this.city = buildCity(this.scene);
     this.net = new RoadNetwork();
     this.rider = new Rider(this.scene);
@@ -36,17 +40,48 @@ export class Game {
     this.hud = new HUD(hudRoot);
     this.minimap = new Minimap(hudRoot);
     this.planView = new PlanView(document.getElementById('overlay'));
+    this.dayEnd = new DayEnd(document.getElementById('overlay'));
 
-    this.state = 'ride'; // ride | plan
+    // 系统层
+    this.mods = {};
+    this.knowledge = new KnowledgeSystem();
+    this.knowledge.onUnlock = (k) => {
+      this.hud.toast(`🧠 习得知识【${k.name}】${k.desc}`, '#ffd166');
+      this.audio.tone(1240, 0.3, 'triangle', 0.5);
+    };
+    this.events = new EventSystem(this);
+    this.events.onToast = (t, c) => this.hud.toast(t, c);
+    this.difficulty = new DifficultySystem();
+    this.knowledge.applyMods(this);
+
+    // 充电点（两个路口）
+    const h = this.net.half, bs = 64;
+    this.chargers = [
+      { x: -h + 2 * bs, z: -h + 2 * bs },
+      { x: h - 2 * bs, z: h - 2 * bs },
+    ];
+    for (const c of this.chargers) {
+      const pylon = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.5, 0.7, 5, 6),
+        new THREE.MeshBasicMaterial({ color: 0x7dffb2 })
+      );
+      pylon.position.set(c.x + 8, 2.5, c.z + 8);
+      this.scene.add(pylon);
+      c.px = c.x + 8; c.pz = c.z + 8;
+    }
+
+    this.state = 'shift'; // shift | ride | plan | dayend
     this.plan = { stops: [], legs: [], totalEtaSec: 0, unreachable: 0 };
     this.autoNav = true;
     this.money = 0;
+    this.dayStartMoney = 0;
+    this.dayNumber = 1;
+    this.shift = SHIFTS[1];
     this.clock = new THREE.Clock();
     this.fps = { frames: 0, t: 0, value: 0 };
     this.lastReplanPos = new THREE.Vector3();
     this.routeMesh = null;
 
-    // 导航箭头（悬浮在骑手上空指向下一途径点）
     this.navArrow = new THREE.Mesh(
       new THREE.ConeGeometry(0.9, 2.2, 4),
       new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.8 })
@@ -61,7 +96,43 @@ export class Game {
       this.renderer.setSize(innerWidth, innerHeight);
     });
 
+    new ShiftSelect(document.getElementById('overlay'), (s) => this.startDay(s));
     this.installDebug();
+  }
+
+  startDay(shift) {
+    this.shift = shift;
+    this.workday.startShift(shift.start);
+    this.dayStartMoney = this.money;
+    this.state = 'ride';
+    this.hud.toast(`🛵 ${shift.name}开工！`, '#00e5ff');
+  }
+
+  endDay() {
+    this.state = 'dayend';
+    this.orders.active.length = 0;
+    this.orders.offers.length = 0;
+    this.replan();
+    this.dayEnd.show({
+      money: this.money,
+      dayMoney: this.money - this.dayStartMoney,
+      delivered: this.orders.stats.delivered,
+      late: this.orders.stats.late,
+      events: this.events.log,
+      knowledgeIds: [...this.knowledge.unlocked],
+    }, () => {
+      // 新的一天：清场重来
+      this.orders.stats.delivered = 0;
+      this.orders.stats.late = 0;
+      this.events = new EventSystem(this);
+      this.events.onToast = (t, c) => this.hud.toast(t, c);
+      this.net.clearEdges();
+      this.rider.teleport(0, 0, Math.PI);
+      this.rider.battery = 100;
+      this.dayNumber++;
+      new ShiftSelect(document.getElementById('overlay'), (s) => this.startDay(s));
+      this.state = 'shift';
+    });
   }
 
   replan() {
@@ -86,7 +157,8 @@ export class Game {
     const path = new THREE.CurvePath();
     for (let i = 1; i < pts.length; i++) path.add(new THREE.LineCurve3(pts[i - 1], pts[i]));
     const geo = new THREE.TubeGeometry(path, pts.length * 6, 0.4, 5, false);
-    this.routeMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.5 }));
+    const color = this.mods.speedFactorEvent > 1 ? 0x7dffb2 : 0x00e5ff; // 无人机指路变绿
+    this.routeMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5 }));
     this.scene.add(this.routeMesh);
   }
 
@@ -103,6 +175,10 @@ export class Game {
   }
 
   update(dt) {
+    if (this.state === 'shift' || this.state === 'dayend') {
+      this.input.endFrame();
+      return;
+    }
     if (this.state === 'plan') {
       if (this.input.justPressed('Enter', 'Space')) this.confirmPlan();
       if (this.input.justPressed('KeyN')) {
@@ -115,27 +191,46 @@ export class Game {
     }
 
     this.workday.update(dt);
+    if (this.workday.isOver) { this.endDay(); this.input.endFrame(); return; }
     const dtGameSec = dt * this.workday.timeScale;
+    this.lighting.update(this.workday.minutes);
+
+    this.mods.jamNow = this.events.jamFactorAt(this.rider.pos);
+    this.events.update(dt);
 
     if (this.input.justPressed('Enter') && this.orders.offers.length) this.enterPlanIfAccepted();
     if (this.input.justPressed('KeyE')) {
-      const res = this.orders.tryInteract(this.rider.pos, this.audio);
+      const res = this.orders.tryInteract(this.rider.pos, this.audio, { mods: this.mods, workdayMin: this.workday.minutes });
       if (res) {
         if (res.kind === 'deliver') {
-          this.money += res.pay;
-          this.hud.toast(`+¥${res.pay.toFixed(1)} ${res.onTime ? '准时送达！' : '超时…'}`);
+          const tip = this.events.onDelivery();
+          this.money += res.pay + tip;
+          this.hud.toast(`+¥${(res.pay + tip).toFixed(1)} ${res.onTime ? '准时送达！' : '超时…'}${res.combo ? ' 🧲连击' : ''}`);
+          this.difficulty.record((res.order.limitSec - Math.max(0, res.order.remainSec)) / res.order.limitSec);
+          this.orders.slackScale = this.difficulty.slackScale;
+          this.knowledge.check(this);
         }
         this.replan();
       }
     }
 
-    this.rider.update(dt, this.input, this.city.colliders, this.city.bounds, this.audio);
-    this.orders.update(dt, dtGameSec);
+    // 充电点
+    let charging = false;
+    for (const c of this.chargers) {
+      if (Math.hypot(this.rider.pos.x - c.px, this.rider.pos.z - c.pz) < 8) {
+        this.rider.battery = Math.min(100, this.rider.battery + 28 * dt);
+        charging = true;
+      }
+    }
 
-    // 偏离路线较远时自动重规划
+    this.rider.update(dt, {
+      input: this.input, colliders: this.city.colliders, bounds: this.city.bounds,
+      audio: this.audio, mods: this.mods,
+    });
+    this.orders.update(dt, dtGameSec, this.workday.isPeak);
+
     if (this.plan.stops.length && this.rider.pos.distanceTo(this.lastReplanPos) > 18) this.replan();
 
-    // 导航箭头
     if (this.autoNav && this.plan.legs.length) {
       const next = this.plan.legs[0].pts[1] || this.plan.legs[0].pts[0];
       const ang = Math.atan2(next.x - this.rider.pos.x, next.z - this.rider.pos.z);
@@ -144,14 +239,13 @@ export class Game {
       this.navArrow.rotation.set(Math.PI / 2, ang, 0);
     } else this.navArrow.visible = false;
 
-    // 俯视跟随相机
     const target = this.rider.pos.clone().add(this.camOffset);
     this.camera.position.lerp(target, 1 - Math.exp(-BALANCE.camera.lerp * dt));
     this.camera.lookAt(this.rider.pos.x, 0, this.rider.pos.z);
 
     this.hud.update(this);
-    this.hud.prompt(this.orders.interactHint(this.rider.pos));
-    this.minimap.update(this.net, this.rider, this.plan);
+    this.hud.prompt(charging ? '⚡ 闪充中…' : this.orders.interactHint(this.rider.pos));
+    this.minimap.update(this.net, this.rider, this.plan, this.chargers);
     this.input.endFrame();
   }
 
@@ -172,15 +266,15 @@ export class Game {
   installDebug() {
     const g = this;
     window.__game = {
-      version: 'M2',
+      version: 'M3',
       ready: true,
       money: () => g.money,
       time: () => g.workday.hhmm,
       minutes: () => g.workday.minutes,
       fps: () => g.fps.value,
       state: () => g.state,
-      rider: () => ({ x: g.rider.pos.x, z: g.rider.pos.z, heading: g.rider.heading, speed: g.rider.speed }),
-      offers: () => g.orders.offers.map((o) => ({ id: o.id, reward: o.reward, limitSec: o.limitSec })),
+      rider: () => ({ x: g.rider.pos.x, z: g.rider.pos.z, heading: g.rider.heading, speed: g.rider.speed, battery: g.rider.battery, frozen: g.rider.frozen }),
+      offers: () => g.orders.offers.map((o) => ({ id: o.id, reward: o.reward, limitSec: o.limitSec, tag: o.tag })),
       active: () => g.orders.active.map((o) => ({ id: o.id, phase: o.phase, remainSec: o.remainSec, reward: o.reward })),
       stats: () => ({ ...g.orders.stats }),
       spawnOffer: () => !!g.orders.spawnOffer(),
@@ -188,13 +282,28 @@ export class Game {
       teleport: (x, z, heading) => { g.rider.teleport(x, z, heading); if (g.plan.stops.length) g.replan(); },
       targetPos: () => { const s = g.plan.stops[0]; return s ? { x: s.pos.x, z: s.pos.z, phase: s.kind } : null; },
       setTimeScale: (k) => { g.workday.timeScale = k; },
-      // M2
       planInfo: () => ({ totalEtaSec: g.plan.totalEtaSec, legs: g.plan.legs.length, stops: g.plan.stops.length, unreachable: g.plan.unreachable }),
       confirmPlan: () => g.confirmPlan(),
       setAutoNav: (b) => { g.autoNav = b; g.updateRibbon(); },
       autoNav: () => g.autoNav,
       routeVisible: () => !!g.routeMesh,
       replan: () => g.replan(),
+      // M3
+      selectShift: (i) => { document.querySelectorAll('.shift-card')[i]?.click(); return g.state; },
+      setMinutes: (m) => { g.workday.minutes = m; },
+      isPeak: () => g.workday.isPeak,
+      lighting: () => ({ sky: '#' + g.lighting.skyColor.getHexString(), sunI: +g.lighting.sun.intensity.toFixed(2), hemiI: +g.lighting.hemi.intensity.toFixed(2) }),
+      forceEvent: (id) => !!g.events.fire(id),
+      eventsActive: () => g.events.active.map((a) => a.def.id),
+      eventLog: () => g.events.log.map((e) => e.id),
+      jamNow: () => g.mods.jamNow,
+      blockedEdges: () => [...g.net.edgeState.entries()].map(([k, v]) => ({ k, blocked: !!v.blocked })),
+      slackScale: () => +g.orders.slackScale.toFixed(3),
+      recordDelivery: (ratio) => { g.difficulty.record(ratio); g.orders.slackScale = g.difficulty.slackScale; },
+      knowledge: () => [...g.knowledge.unlocked],
+      charge: (pct) => { g.rider.battery = pct; },
+      eventsTimer: (v) => { g.events.timer = v; },       // 测试：推迟随机事件
+      setDelivered: (n) => { g.orders.stats.delivered = n; g.knowledge.check(g); },
     };
   }
 }
