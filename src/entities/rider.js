@@ -44,6 +44,7 @@ export class Rider {
     this.frozen = false;      // 交警查车等
     this.grip = 1;            // 雨天 < 1
     this.crashCooldown = 0;
+    this.odoM = 0;
     this.syncMesh();
   }
 
@@ -117,6 +118,7 @@ export class Rider {
     }
 
     this.pos.copy(next);
+    this.odoM += Math.abs(this.speed) * dt;
     const lean = -steer * steerAuthority * 0.35;
     this.group.rotation.z += (lean - this.group.rotation.z) * Math.min(1, dt * 8);
     this.syncMesh();

@@ -1,6 +1,8 @@
 // 游戏主控制器：渲染循环 + 模块编排 + 调试句柄（e2e 测试用）
+// 状态机：pm(产品经理开场) → layoff(被裁转场) → shift(选班) → ride/plan ⇄ dayend(日结算)
 import * as THREE from 'three';
 import { BALANCE } from '../config/balance.js';
+import { LAYOFF_LINES } from '../config/story.js';
 import { Input } from './input.js';
 import { GameAudio } from './audio.js';
 import { buildCity } from '../world/city.js';
@@ -12,10 +14,12 @@ import { Workday, SHIFTS } from '../systems/workday.js';
 import { EventSystem } from '../systems/events.js';
 import { KnowledgeSystem } from '../systems/knowledge.js';
 import { DifficultySystem } from '../systems/difficulty.js';
+import { PMPhase } from '../systems/pmPhase.js';
 import { HUD } from '../ui/hud.js';
 import { Minimap } from '../ui/minimap.js';
 import { PlanView } from '../ui/planview.js';
 import { ShiftSelect, DayEnd } from '../ui/screens.js';
+import { LayoffView } from '../ui/story.js';
 
 export class Game {
   constructor(container, hudRoot) {
@@ -39,8 +43,9 @@ export class Game {
     this.audio = new GameAudio();
     this.hud = new HUD(hudRoot);
     this.minimap = new Minimap(hudRoot);
-    this.planView = new PlanView(document.getElementById('overlay'));
-    this.dayEnd = new DayEnd(document.getElementById('overlay'));
+    this.overlayRoot = document.getElementById('overlay');
+    this.planView = new PlanView(this.overlayRoot);
+    this.dayEnd = new DayEnd(this.overlayRoot);
 
     // 系统层
     this.mods = {};
@@ -70,7 +75,6 @@ export class Game {
       c.px = c.x + 8; c.pz = c.z + 8;
     }
 
-    this.state = 'shift'; // shift | ride | plan | dayend
     this.plan = { stops: [], legs: [], totalEtaSec: 0, unreachable: 0 };
     this.autoNav = true;
     this.money = 0;
@@ -81,6 +85,8 @@ export class Game {
     this.fps = { frames: 0, t: 0, value: 0 };
     this.lastReplanPos = new THREE.Vector3();
     this.routeMesh = null;
+    this.camBlend = 0; // 0=俯视 1=近肩
+    this.odoDayM = 0;
 
     this.navArrow = new THREE.Mesh(
       new THREE.ConeGeometry(0.9, 2.2, 4),
@@ -96,14 +102,29 @@ export class Game {
       this.renderer.setSize(innerWidth, innerHeight);
     });
 
-    new ShiftSelect(document.getElementById('overlay'), (s) => this.startDay(s));
+    // 开场：产品经理阶段
+    this.state = 'pm';
+    this.camera.position.set(0, 330, 80);
+    this.camera.lookAt(0, 0, 0);
+    this.pmPhase = new PMPhase(this);
+    this.pmPhase.start(() => this.enterLayoff());
+
     this.installDebug();
+  }
+
+  enterLayoff() {
+    this.state = 'layoff';
+    this.layoff = new LayoffView(this.overlayRoot, LAYOFF_LINES, () => {
+      this.state = 'shift';
+      new ShiftSelect(this.overlayRoot, (s) => this.startDay(s));
+    });
   }
 
   startDay(shift) {
     this.shift = shift;
     this.workday.startShift(shift.start);
     this.dayStartMoney = this.money;
+    this.odoDayM = 0;
     this.state = 'ride';
     this.hud.toast(`🛵 ${shift.name}开工！`, '#00e5ff');
   }
@@ -120,8 +141,8 @@ export class Game {
       late: this.orders.stats.late,
       events: this.events.log,
       knowledgeIds: [...this.knowledge.unlocked],
+      odoKm: this.odoDayM / 1000,
     }, () => {
-      // 新的一天：清场重来
       this.orders.stats.delivered = 0;
       this.orders.stats.late = 0;
       this.events = new EventSystem(this);
@@ -130,7 +151,7 @@ export class Game {
       this.rider.teleport(0, 0, Math.PI);
       this.rider.battery = 100;
       this.dayNumber++;
-      new ShiftSelect(document.getElementById('overlay'), (s) => this.startDay(s));
+      new ShiftSelect(this.overlayRoot, (s) => this.startDay(s));
       this.state = 'shift';
     });
   }
@@ -157,7 +178,7 @@ export class Game {
     const path = new THREE.CurvePath();
     for (let i = 1; i < pts.length; i++) path.add(new THREE.LineCurve3(pts[i - 1], pts[i]));
     const geo = new THREE.TubeGeometry(path, pts.length * 6, 0.4, 5, false);
-    const color = this.mods.speedFactorEvent > 1 ? 0x7dffb2 : 0x00e5ff; // 无人机指路变绿
+    const color = this.mods.speedFactorEvent > 1 ? 0x7dffb2 : 0x00e5ff;
     this.routeMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5 }));
     this.scene.add(this.routeMesh);
   }
@@ -174,7 +195,41 @@ export class Game {
     this.planView.close();
   }
 
+  updateCamera(dt) {
+    // 接近下一停靠点时平滑推近到近肩视角，远离后回到俯视（不生硬切换）
+    const firstStop = this.plan.stops[0];
+    const distStop = firstStop ? this.rider.pos.distanceTo(firstStop.pos) : 999;
+    const wantNear = distStop < 20 ? 1 : 0;
+    this.camBlend += (wantNear - this.camBlend) * Math.min(1, dt * 1.6);
+
+    const h = this.rider.heading;
+    const overX = 0, overY = BALANCE.camera.height, overZ = BALANCE.camera.dist;
+    const nearX = -Math.sin(h) * 9, nearY = 5, nearZ = -Math.cos(h) * 9;
+    const b = this.camBlend;
+    const ox = overX + (nearX - overX) * b;
+    const oy = overY + (nearY - overY) * b;
+    const oz = overZ + (nearZ - overZ) * b;
+
+    const target = new THREE.Vector3(this.rider.pos.x + ox, oy, this.rider.pos.z + oz);
+    this.camera.position.lerp(target, 1 - Math.exp(-BALANCE.camera.lerp * dt));
+    const lookX = this.rider.pos.x + Math.sin(h) * 14 * b;
+    const lookZ = this.rider.pos.z + Math.cos(h) * 14 * b;
+    this.camera.lookAt(lookX, 2 * b, lookZ);
+  }
+
   update(dt) {
+    if (this.state === 'pm') {
+      this.pmPhase.update(dt);
+      if (this.input.justPressed('Digit1')) this.pmPhase.decide(0);
+      if (this.input.justPressed('Digit2')) this.pmPhase.decide(1);
+      this.input.endFrame();
+      return;
+    }
+    if (this.state === 'layoff') {
+      this.layoff.update(dt);
+      this.input.endFrame();
+      return;
+    }
     if (this.state === 'shift' || this.state === 'dayend') {
       this.input.endFrame();
       return;
@@ -214,7 +269,6 @@ export class Game {
       }
     }
 
-    // 充电点
     let charging = false;
     for (const c of this.chargers) {
       if (Math.hypot(this.rider.pos.x - c.px, this.rider.pos.z - c.pz) < 8) {
@@ -223,10 +277,12 @@ export class Game {
       }
     }
 
+    const odo0 = this.rider.odoM;
     this.rider.update(dt, {
       input: this.input, colliders: this.city.colliders, bounds: this.city.bounds,
       audio: this.audio, mods: this.mods,
     });
+    this.odoDayM += this.rider.odoM - odo0;
     this.orders.update(dt, dtGameSec, this.workday.isPeak);
 
     if (this.plan.stops.length && this.rider.pos.distanceTo(this.lastReplanPos) > 18) this.replan();
@@ -237,11 +293,12 @@ export class Game {
       this.navArrow.visible = true;
       this.navArrow.position.set(this.rider.pos.x, 5.5, this.rider.pos.z);
       this.navArrow.rotation.set(Math.PI / 2, ang, 0);
+      const s = 1 - this.camBlend * 0.75; // 近肩视角下缩小箭头防遮挡
+      this.navArrow.scale.set(s, s, s);
+      this.navArrow.material.opacity = 0.8 * (1 - this.camBlend * 0.6);
     } else this.navArrow.visible = false;
 
-    const target = this.rider.pos.clone().add(this.camOffset);
-    this.camera.position.lerp(target, 1 - Math.exp(-BALANCE.camera.lerp * dt));
-    this.camera.lookAt(this.rider.pos.x, 0, this.rider.pos.z);
+    this.updateCamera(dt);
 
     this.hud.update(this);
     this.hud.prompt(charging ? '⚡ 闪充中…' : this.orders.interactHint(this.rider.pos));
@@ -266,7 +323,7 @@ export class Game {
   installDebug() {
     const g = this;
     window.__game = {
-      version: 'M3',
+      version: 'M4',
       ready: true,
       money: () => g.money,
       time: () => g.workday.hhmm,
@@ -302,8 +359,14 @@ export class Game {
       recordDelivery: (ratio) => { g.difficulty.record(ratio); g.orders.slackScale = g.difficulty.slackScale; },
       knowledge: () => [...g.knowledge.unlocked],
       charge: (pct) => { g.rider.battery = pct; },
-      eventsTimer: (v) => { g.events.timer = v; },       // 测试：推迟随机事件
+      eventsTimer: (v) => { g.events.timer = v; },
       setDelivered: (n) => { g.orders.stats.delivered = n; g.knowledge.check(g); },
+      // M4
+      decide: (i) => g.pmPhase?.decide(i),
+      pmInfo: () => g.pmPhase ? { round: g.pmPhase.round, perf: g.pmPhase.perf, stress: g.pmPhase.stress, avgLimit: g.pmPhase.avgLimit } : null,
+      camBlend: () => +g.camBlend.toFixed(2),
+      odoKm: () => +(g.odoDayM / 1000).toFixed(2),
+      skipLayoff: () => g.layoff?.advance() ?? undefined,
     };
   }
 }

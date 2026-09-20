@@ -1,6 +1,7 @@
 // 全屏界面：班次选择 + 日结算（M4 会扩展叙事界面）
 import { SHIFTS } from '../systems/workday.js';
 import { KNOWLEDGE } from '../config/knowledge.js';
+import { RANKS } from '../config/story.js';
 
 const overlayStyle =
   'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;' +
@@ -48,21 +49,27 @@ export class DayEnd {
   }
   show(summary, onNext) {
     this.hide();
-    const { money, dayMoney, delivered, late, events, knowledgeIds } = summary;
+    const { money, dayMoney, delivered, late, events, knowledgeIds, odoKm = 0 } = summary;
     const onTime = delivered ? Math.round(((delivered - late) / delivered) * 100) : 100;
+    const rank = [...RANKS].reverse().find((r) => money >= r.min) || RANKS[0];
+    const knowNames = KNOWLEDGE.filter((k) => knowledgeIds.includes(k.id));
     this.el = document.createElement('div');
     this.el.style.cssText = overlayStyle;
     this.el.innerHTML = `
-      <div style="min-width:520px;max-width:640px;padding:28px 34px;border:1px solid rgba(0,229,255,.5);border-radius:12px;background:rgba(8,14,30,.92);">
-        <h2 style="color:#00e5ff;margin:0 0 14px;">🏁 今日收工</h2>
+      <div style="min-width:560px;max-width:680px;padding:28px 34px;border:1px solid rgba(0,229,255,.5);border-radius:12px;background:rgba(8,14,30,.92);">
+        <h2 style="color:#00e5ff;margin:0 0 4px;">🏁 今日收工</h2>
+        <div style="color:#ffd166;font-size:14px;margin-bottom:14px;">段位评定：<b>${rank.name}</b></div>
         <div style="display:flex;gap:26px;font-size:15px;line-height:2;">
           <div>
             <div>今日收入：<b style="color:#7dffb2">¥${dayMoney.toFixed(1)}</b></div>
             <div>累计余额：<b style="color:#7dffb2">¥${money.toFixed(1)}</b></div>
             <div>准时率：<b style="color:${onTime >= 80 ? '#7dffb2' : '#ff8fa3'}">${onTime}%</b>（${delivered - late}/${delivered}）</div>
-            <div>已解锁知识：<b style="color:#ffd166">${knowledgeIds.length}/${KNOWLEDGE.length}</b></div>
+            <div>行驶里程：<b style="color:#00e5ff">${odoKm.toFixed(1)} km</b></div>
+            <div>知识：<b style="color:#ffd166">${knowledgeIds.length}/${KNOWLEDGE.length}</b>
+              <div style="font-size:12px;color:#9fc6e0;">${knowNames.map((k) => `${k.icon}${k.name}`).join('　') || '尚未解锁'}</div>
+            </div>
           </div>
-          <div style="flex:1;max-height:180px;overflow:auto;">
+          <div style="flex:1;max-height:200px;overflow:auto;">
             <div style="color:#7fb8d8;margin-bottom:4px;">今日遭遇</div>
             ${events.length ? events.map((e) => `<div>${e.icon} ${e.at} ${e.name}</div>`).join('') : '<div style="color:#5b7a94">风平浪静的一天</div>'}
           </div>

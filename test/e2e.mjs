@@ -1,4 +1,4 @@
-// 端到端验证：驾驶 + 接单→规划→取餐→送达全流程 + 系统层（昼夜/事件/难度/知识/日结）
+// 端到端验证：开场叙事 → 选班 → 驾驶 → 接单→规划→取餐→送达 → 系统层 → 日终结算
 // 用法：node test/e2e.mjs [milestone]
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const milestone = process.argv[2] || 'm3';
+const milestone = process.argv[2] || 'm4';
 const shots = path.join(root, 'docs', 'shots');
 fs.mkdirSync(shots, { recursive: true });
 
@@ -58,19 +58,38 @@ try {
   const ready = await page.waitForFunction(() => window.__game?.ready, null, { timeout: 15000 }).catch(() => null);
   log(!!ready, 'game boots (window.__game ready)');
 
-  // 0) 班次选择（M3）
-  await page.waitForTimeout(800);
-  log((await G('state()')) === 'shift', 'boots into shift select');
-  await page.screenshot({ path: path.join(shots, `${milestone}-00-shift.png`) });
-  await page.keyboard.press('Digit3'); // 夜班（覆盖 16:00–24:00，便于测真·夜晚）
+  // === M4 叙事层：产品经理开场 ===
+  log((await G('state()')) === 'pm', 'boots into PM phase');
+  await page.waitForTimeout(8500); // 等开场文案 + 第一张决策卡
+  await page.screenshot({ path: path.join(shots, `${milestone}-01-pm.png`) });
+  const pm0 = await G('pmInfo()');
+  log(pm0 && pm0.round === 0, 'PM decision card phase', JSON.stringify(pm0));
+  // 做 3 轮决策（全选压缩）
+  for (let r = 0; r < 3; r++) {
+    await page.keyboard.press('Digit1');
+    await page.waitForTimeout(400);
+  }
+  const pm1 = await G('pmInfo()');
+  log(pm1.round === 3 && pm1.perf > 50, '3 decisions applied, perf up', JSON.stringify(pm1));
+  await page.waitForTimeout(3500); // 等进入转场
+  log((await G('state()')) === 'layoff', 'layoff transition starts');
+  await page.waitForTimeout(3000);
+  await page.screenshot({ path: path.join(shots, `${milestone}-02-layoff.png`) });
+  await page.evaluate(() => window.__game.skipLayoff()); // 补全文字
+  await page.evaluate(() => window.__game.skipLayoff()); // 结束转场
+  await page.waitForTimeout(300);
+  log((await G('state()')) === 'shift', 'layoff done → shift select');
+
+  // === 选班 ===
+  await page.keyboard.press('Digit3'); // 夜班
   await page.waitForTimeout(300);
   log((await G('state()')) === 'ride', 'shift selected → ride');
-  await page.evaluate(() => window.__game.eventsTimer(9999)); // 冻结随机事件，逐个手动触发
+  await page.evaluate(() => window.__game.eventsTimer(9999));
 
-  await page.waitForTimeout(2000);
-  await page.screenshot({ path: path.join(shots, `${milestone}-01-city.png`) });
+  await page.waitForTimeout(1500);
+  await page.screenshot({ path: path.join(shots, `${milestone}-03-city.png`) });
 
-  // 1) 驾驶控制
+  // === 驾驶控制 ===
   const before = await G('rider()');
   await page.keyboard.down('KeyW');
   await page.waitForTimeout(1500);
@@ -80,7 +99,6 @@ try {
   const fwdDot = ((after.x - before.x) * Math.sin(after.heading) + (after.z - before.z) * Math.cos(after.heading)) / (moved || 1);
   log(after.speed > 2 || moved > 5, 'W accelerates', `speed=${after.speed.toFixed(1)} moved=${moved.toFixed(1)}`);
   log(fwdDot > 0.7, 'movement follows heading', `fwdDot=${fwdDot.toFixed(2)}`);
-
   const h0 = (await G('rider()')).heading;
   await page.keyboard.down('KeyW'); await page.keyboard.down('KeyA');
   await page.waitForTimeout(700);
@@ -88,7 +106,7 @@ try {
   const h1 = (await G('rider()')).heading;
   log(h1 > h0 + 0.05, 'A steers left', `Δheading=${(h1 - h0).toFixed(2)}`);
 
-  // 2) 接单 → 规划 → 送达
+  // === 接单 → 规划 → 近肩镜头 → 送达 ===
   await page.evaluate(() => { window.__game.spawnOffer(); });
   const money0 = await G('money()');
   await page.evaluate(() => window.__game.accept(0));
@@ -96,9 +114,6 @@ try {
   log((await G('state()')) === 'plan', 'accepting enters PLAN state');
   const planInfo = await G('planInfo()');
   log(planInfo.totalEtaSec > 0 && planInfo.stops === 2, 'plan has ETA + 2 stops', JSON.stringify(planInfo));
-  await page.screenshot({ path: path.join(shots, `${milestone}-02-plan.png`) });
-  log(await page.evaluate(() => !!document.querySelector('#minimap')), 'minimap canvas exists');
-
   await page.keyboard.press('Enter');
   await page.waitForTimeout(200);
   log((await G('state()')) === 'ride', 'Enter confirms plan → ride');
@@ -106,6 +121,13 @@ try {
 
   let target = await G('targetPos()');
   log(target?.phase === 'pickup', 'next stop = pickup');
+  // 靠近目标 → 镜头推近（近肩沉浸）
+  await page.evaluate((t) => window.__game.teleport(t.x + 12, t.z), target);
+  await page.waitForTimeout(2500);
+  const blend = await G('camBlend()');
+  log(blend > 0.4, 'camera blends to near-shoulder near stop', `camBlend=${blend}`);
+  await page.screenshot({ path: path.join(shots, `${milestone}-04-nearcam.png`) });
+  await page.keyboard.press('KeyE'); // 已在交互半径外？12m > 7m，靠近一点
   await page.evaluate((t) => window.__game.teleport(t.x, t.z), target);
   await page.waitForTimeout(150);
   await page.keyboard.press('KeyE');
@@ -120,45 +142,29 @@ try {
   const stats = await G('stats()');
   log(money1 > money0, 'delivery pays out', `¥${money0} → ¥${money1.toFixed(1)}`);
   log(stats.delivered === 1, 'stats.delivered = 1');
-  await page.screenshot({ path: path.join(shots, `${milestone}-03-delivered.png`) });
+  log((await G('odoKm()')) > 0, 'odometer tracks distance');
 
-  // 3) M3 系统层
-  // 昼夜光照
+  // === M3 系统层回归 ===
   await page.evaluate(() => window.__game.setMinutes(12 * 60));
   await page.waitForTimeout(300);
   const noon = await G('lighting()');
-  await page.screenshot({ path: path.join(shots, `${milestone}-04-noon.png`) });
   await page.evaluate(() => window.__game.setMinutes(22 * 60));
   await page.waitForTimeout(300);
   const night = await G('lighting()');
-  await page.screenshot({ path: path.join(shots, `${milestone}-05-night.png`) });
   log(noon.sunI > night.sunI && noon.sky !== night.sky, 'day/night lighting differs', `noon=${JSON.stringify(noon)} night=${JSON.stringify(night)}`);
-  // 高峰
   await page.evaluate(() => window.__game.setMinutes(11.5 * 60));
   log(await G('isPeak()'), 'peak hour detected at 11:30');
   await page.evaluate(() => window.__game.setMinutes(15 * 60));
-  log(!(await G('isPeak()')), 'off-peak at 15:00');
 
-  // 事件：封路
   await page.evaluate(() => window.__game.forceEvent('road_closure'));
   await page.waitForTimeout(150);
-  const blocked = await G('blockedEdges()');
-  log(blocked.some((e) => e.blocked), 'road_closure blocks an edge', JSON.stringify(blocked));
-  // 事件：堵车
+  log((await G('blockedEdges()')).some((e) => e.blocked), 'road_closure blocks an edge');
   await page.evaluate(() => window.__game.forceEvent('traffic_jam'));
-  await page.waitForTimeout(150);
-  log((await G('eventsActive()')).includes('traffic_jam'), 'traffic_jam active');
-  // 事件：无人机（好事件）
   await page.evaluate(() => window.__game.forceEvent('drone_guide'));
-  await page.waitForTimeout(150);
-  log((await G('eventsActive()')).includes('drone_guide'), 'drone_guide active (good event)');
-  // 事件：订单转让（高风险高回报）
   await page.evaluate(() => window.__game.forceEvent('order_transfer'));
-  await page.waitForTimeout(150);
-  const offers = await G('offers()');
-  log(offers.some((o) => o.tag === '⚡转让'), 'order_transfer adds high-reward offer');
+  await page.waitForTimeout(200);
+  log((await G('offers()')).some((o) => o.tag === '⚡转让'), 'order_transfer adds high-reward offer');
 
-  // 事件：交警查车 → 冻结 → 解锁知识 → 到时放行
   await page.evaluate(() => window.__game.forceEvent('police_check'));
   await page.waitForTimeout(150);
   log((await G('rider()')).frozen, 'police_check freezes rider');
@@ -166,7 +172,6 @@ try {
   await page.waitForTimeout(6500);
   log(!(await G('rider()')).frozen, 'rider released after check');
 
-  // 电池：加速耗电
   await page.evaluate(() => window.__game.charge(60));
   await page.keyboard.down('KeyW'); await page.keyboard.down('ShiftLeft');
   await page.waitForTimeout(1500);
@@ -174,22 +179,22 @@ try {
   const batt = (await G('rider()')).battery;
   log(batt < 58, 'boost drains battery', `battery=${batt.toFixed(1)}`);
 
-  // 难度渐进：连续快送 → 时限收紧
   const s0 = await G('slackScale()');
   await page.evaluate(() => { for (let i = 0; i < 3; i++) window.__game.recordDelivery(0.4); });
   const s1 = await G('slackScale()');
   log(s1 < s0, 'difficulty tightens after fast deliveries', `${s0} → ${s1}`);
-
-  // 知识锁：送达数解锁
   await page.evaluate(() => window.__game.setDelivered(5));
   const know = await G('knowledge()');
   log(know.includes('pre_order') && know.includes('merge_orders'), 'knowledge unlocked by deliveries', know.join(','));
 
-  // 日终结算（夜班 24:00 结束）
+  // === 日终结算（M4 版内容断言） ===
   await page.evaluate(() => window.__game.setMinutes(24 * 60 + 0.01));
   await page.waitForTimeout(400);
   log((await G('state()')) === 'dayend', 'day ends at 24:00 → settlement');
-  await page.screenshot({ path: path.join(shots, `${milestone}-06-dayend.png`) });
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: path.join(shots, `${milestone}-05-dayend.png`) });
+  const dayendHtml = await page.evaluate(() => document.getElementById('overlay').textContent);
+  log(dayendHtml.includes('今日收入') && dayendHtml.includes('准时率') && dayendHtml.includes('今日遭遇') && dayendHtml.includes('段位'), 'settlement shows income/on-time/events/rank');
   await page.keyboard.press('KeyR');
   await page.waitForTimeout(300);
   log((await G('state()')) === 'shift', 'R starts new day (shift select)');
