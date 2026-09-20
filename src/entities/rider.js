@@ -45,13 +45,21 @@ export class Rider {
     this.grip = 1;            // 雨天 < 1
     this.crashCooldown = 0;
     this.odoM = 0;
+    this.y = 0;             // 离地高度（跳坡滞空）
+    this.vy = 0;
+    this.airborne = false;
+    this.justCrashed = false;
+    this.justLanded = false;
+    this.onSidewalk = false;
     this.syncMesh();
   }
 
   forward() { return new THREE.Vector3(Math.sin(this.heading), 0, Math.cos(this.heading)); }
 
   update(dt, ctx) {
-    const { input, colliders, bounds, audio, mods } = ctx;
+    const { input, colliders, bounds, audio, mods, ramps = [], isSidewalk = () => false } = ctx;
+    this.justCrashed = false;
+    this.justLanded = false;
 
     if (this.frozen) {
       this.speed = Math.max(0, this.speed - R.brake * dt);
@@ -66,9 +74,12 @@ export class Rider {
     const right = input.down('KeyD', 'ArrowRight');
     this.boosting = input.down('ShiftLeft', 'ShiftRight') && up && this.battery > 15;
 
-    const speedCap = (this.boosting ? R.boostSpeed : R.maxSpeed)
+    const speedCap0 = (this.boosting ? R.boostSpeed : R.maxSpeed)
       * (mods.maxSpeedFactor || 1) * (mods.speedFactorEvent || 1) * (mods.jamNow || 1)
       * (this.battery <= 15 ? 0.5 : 1);
+    // 人行道限速（不空中、不冲刺时），但不受堵车影响
+    this.onSidewalk = !this.airborne && isSidewalk(this.pos.x, this.pos.z);
+    const speedCap = this.onSidewalk && !this.boosting ? Math.min(speedCap0, 15 * (mods.maxSpeedFactor || 1)) : speedCap0;
 
     if (up) this.speed += R.accel * dt;
     else if (down) this.speed -= (this.speed > 0.5 ? R.brake : R.accel * 0.5) * dt;
@@ -98,22 +109,55 @@ export class Rider {
     next.x = Math.max(-bounds, Math.min(bounds, next.x));
     next.z = Math.max(-bounds, Math.min(bounds, next.z));
 
-    this.crashCooldown -= dt;
-    for (const c of colliders) {
-      const cx = Math.max(c.minX, Math.min(next.x, c.maxX));
-      const cz = Math.max(c.minZ, Math.min(next.z, c.maxZ));
-      const dx = next.x - cx, dz = next.z - cz;
-      const d2 = dx * dx + dz * dz;
-      if (d2 < R.radius * R.radius) {
-        const d = Math.sqrt(d2) || 0.001;
-        const push = (R.radius - d) / d;
-        next.x += dx * push;
-        next.z += dz * push;
-        if (this.crashCooldown <= 0 && Math.abs(this.speed) > 6) {
-          audio?.bump();
-          this.crashCooldown = 0.4;
+    // 工地坡道起跳：沿坡道方向且速度足够 → 滞空飞跃（空中无视建筑碰撞）
+    if (!this.airborne) {
+      for (const r of ramps) {
+        const relX = next.x - r.x, relZ = next.z - r.z;
+        const along = relX * r.dirX + relZ * r.dirZ;
+        const perp = Math.abs(relX * r.dirZ - relZ * r.dirX);
+        if (Math.abs(along) < r.halfL && perp < r.halfW) {
+          const velAlong = dir.x * r.dirX + dir.z * r.dirZ;
+          if (Math.abs(velAlong) > 0.7 && Math.abs(this.speed) > 10) {
+            this.airborne = true;
+            this.vy = 8.5 + Math.abs(this.speed) * 0.12;
+            audio?.tone(500, 0.25, 'triangle', 0.5);
+            break;
+          }
         }
-        this.speed *= 0.35;
+      }
+    }
+
+    // 滞空物理
+    if (this.airborne) {
+      this.y += this.vy * dt;
+      this.vy -= 26 * dt;
+      if (this.y <= 0) {
+        this.y = 0;
+        this.vy = 0;
+        this.airborne = false;
+        this.justLanded = true;
+      }
+    }
+
+    this.crashCooldown -= dt;
+    if (!this.airborne) {
+      for (const c of colliders) {
+        const cx = Math.max(c.minX, Math.min(next.x, c.maxX));
+        const cz = Math.max(c.minZ, Math.min(next.z, c.maxZ));
+        const dx = next.x - cx, dz = next.z - cz;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < R.radius * R.radius) {
+          const d = Math.sqrt(d2) || 0.001;
+          const push = (R.radius - d) / d;
+          next.x += dx * push;
+          next.z += dz * push;
+          if (this.crashCooldown <= 0 && Math.abs(this.speed) > 6) {
+            audio?.bump();
+            this.justCrashed = true;
+            this.crashCooldown = 0.4;
+          }
+          this.speed *= 0.35;
+        }
       }
     }
 
@@ -128,7 +172,7 @@ export class Rider {
   audioIdle(audio) { audio?.engine(0); }
 
   syncMesh() {
-    this.group.position.copy(this.pos);
+    this.group.position.set(this.pos.x, this.y, this.pos.z);
     this.group.rotation.y = this.heading;
   }
 
@@ -137,6 +181,7 @@ export class Rider {
     this.heading = heading;
     this.moveAngle = heading;
     this.speed = 0;
+    this.y = 0; this.vy = 0; this.airborne = false;
     this.syncMesh();
   }
 }

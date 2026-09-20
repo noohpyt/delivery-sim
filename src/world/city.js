@@ -49,6 +49,7 @@ export function buildCity(scene) {
   const colliders = [];
   const customerSpots = [];
   const restaurants = [];
+  const ramps = [];
 
   const bs = MAP.blockSize;
   const half = (MAP.blocks * bs) / 2;
@@ -94,7 +95,7 @@ export function buildCity(scene) {
         park.position.set(cx, 0.3, cz);
         group.add(park);
       } else if (roll < 0.2 && !isRestaurant) {
-        // 工地（M5 会加跳坡）
+        // 工地：含可跳坡道（冲上去可以飞过街区抄近路）
         const site = new THREE.Mesh(new THREE.BoxGeometry(innerHalf * 2, 0.5, innerHalf * 2), siteMat);
         site.position.set(cx, 0.25, cz);
         group.add(site);
@@ -103,6 +104,20 @@ export function buildCity(scene) {
         crane.position.set(cx - innerHalf / 2, 0, cz - innerHalf / 2);
         group.add(crane);
         colliders.push({ minX: crane.position.x - 1.5, maxX: crane.position.x + 1.5, minZ: crane.position.z - 1.5, maxZ: crane.position.z + 1.5 });
+        // 斜坡：随机沿 x 或 z 方向
+        const alongX = rng() < 0.5;
+        const ramp = new THREE.Mesh(new THREE.BoxGeometry(alongX ? 16 : 9, 1.2, alongX ? 9 : 16), siteMat);
+        ramp.position.set(cx, 1.0, cz);
+        ramp.rotation[alongX ? 'z' : 'x'] = alongX ? -0.18 : 0.18;
+        group.add(ramp);
+        const rampEdge = new THREE.LineSegments(
+          new THREE.EdgesGeometry(ramp.geometry),
+          new THREE.LineBasicMaterial({ color: 0xffd166 })
+        );
+        rampEdge.position.copy(ramp.position);
+        rampEdge.rotation.copy(ramp.rotation);
+        group.add(rampEdge);
+        ramps.push({ x: cx, z: cz, dirX: alongX ? 1 : 0, dirZ: alongX ? 0 : 1, halfL: 8, halfW: 4.5 });
       } else {
         // 2x2 槽位塔楼
         for (let si = 0; si < 2; si++) {
@@ -174,5 +189,20 @@ export function buildCity(scene) {
   group.add(bollard);
 
   scene.add(group);
-  return { group, colliders, customerSpots, restaurants, bounds: half + bs / 2 - 4, worldSize };
+  return { group, colliders, customerSpots, restaurants, ramps, bounds: half + bs / 2 - 4, worldSize };
+}
+
+// 人行道判定：距最近路中心线在 [路缘, 路缘+人行道宽] 区间
+export function isSidewalkPos(x, z) {
+  const half = (MAP.blocks * MAP.blockSize) / 2;
+  const bs = MAP.blockSize;
+  const roadHalf = MAP.roadWidth / 2;
+  const distToLine = (v) => {
+    const f = ((v + half) % bs + bs) % bs;
+    return Math.min(f, bs - f);
+  };
+  const dx = distToLine(x), dz = distToLine(z);
+  const onRoad = dx < roadHalf || dz < roadHalf;
+  if (onRoad) return false;
+  return dx < roadHalf + MAP.sidewalk || dz < roadHalf + MAP.sidewalk;
 }

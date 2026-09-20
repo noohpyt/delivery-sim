@@ -5,7 +5,7 @@ import { BALANCE } from '../config/balance.js';
 import { LAYOFF_LINES } from '../config/story.js';
 import { Input } from './input.js';
 import { GameAudio } from './audio.js';
-import { buildCity } from '../world/city.js';
+import { buildCity, isSidewalkPos } from '../world/city.js';
 import { DayNight } from '../world/lighting.js';
 import { Rider } from '../entities/rider.js';
 import { OrderSystem } from '../systems/orders.js';
@@ -20,6 +20,7 @@ import { Minimap } from '../ui/minimap.js';
 import { PlanView } from '../ui/planview.js';
 import { ShiftSelect, DayEnd } from '../ui/screens.js';
 import { LayoffView } from '../ui/story.js';
+import { Particles } from '../fx/particles.js';
 
 export class Game {
   constructor(container, hudRoot) {
@@ -87,6 +88,10 @@ export class Game {
     this.routeMesh = null;
     this.camBlend = 0; // 0=俯视 1=近肩
     this.odoDayM = 0;
+    this.shake = 0;
+    this.trailT = 0;
+    this.particles = new Particles(this.scene);
+    this.hintFlags = new Set();
 
     this.navArrow = new THREE.Mesh(
       new THREE.ConeGeometry(0.9, 2.2, 4),
@@ -127,6 +132,16 @@ export class Game {
     this.odoDayM = 0;
     this.state = 'ride';
     this.hud.toast(`🛵 ${shift.name}开工！`, '#00e5ff');
+    if (!this.hintFlags.has('controls')) {
+      this.hintFlags.add('controls');
+      this.hud.hint('W 加速 · A/D 转向 · Shift 冲刺 · Enter 接单 · E 取/送餐', 8);
+    }
+  }
+
+  hint(id, text, dur = 5) {
+    if (this.hintFlags.has(id)) return;
+    this.hintFlags.add(id);
+    this.hud.hint(text, dur);
   }
 
   endDay() {
@@ -188,6 +203,7 @@ export class Game {
     this.replan();
     this.planView.open(this.net, this.rider, this.plan, this.autoNav);
     this.audio.accept();
+    this.hint('plan', '看好路线与总耗时，按 Enter 出发；N 可关自动导航', 5);
   }
 
   confirmPlan() {
@@ -204,17 +220,32 @@ export class Game {
 
     const h = this.rider.heading;
     const overX = 0, overY = BALANCE.camera.height, overZ = BALANCE.camera.dist;
-    const nearX = -Math.sin(h) * 9, nearY = 5, nearZ = -Math.cos(h) * 9;
+    const nearX = -Math.sin(h) * 9, nearY = 6, nearZ = -Math.cos(h) * 9;
     const b = this.camBlend;
     const ox = overX + (nearX - overX) * b;
     const oy = overY + (nearY - overY) * b;
     const oz = overZ + (nearZ - overZ) * b;
 
-    const target = new THREE.Vector3(this.rider.pos.x + ox, oy, this.rider.pos.z + oz);
+    const target = new THREE.Vector3(this.rider.pos.x + ox, oy + this.rider.y * b, this.rider.pos.z + oz);
     this.camera.position.lerp(target, 1 - Math.exp(-BALANCE.camera.lerp * dt));
+
+    // 碰撞/落地震屏
+    this.shake = Math.max(0, this.shake - dt * 2.2);
+    if (this.shake > 0.01) {
+      this.camera.position.x += (Math.random() - 0.5) * this.shake * 2;
+      this.camera.position.y += (Math.random() - 0.5) * this.shake * 2;
+    }
+
+    // 速度感 FOV
+    const fov = 55 + (Math.abs(this.rider.speed) / 33) * 13 * (1 - b * 0.5);
+    if (Math.abs(this.camera.fov - fov) > 0.1) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+
     const lookX = this.rider.pos.x + Math.sin(h) * 14 * b;
     const lookZ = this.rider.pos.z + Math.cos(h) * 14 * b;
-    this.camera.lookAt(lookX, 2 * b, lookZ);
+    this.camera.lookAt(lookX, 2.6 * b, lookZ);
   }
 
   update(dt) {
@@ -250,8 +281,12 @@ export class Game {
     const dtGameSec = dt * this.workday.timeScale;
     this.lighting.update(this.workday.minutes);
 
-    this.mods.jamNow = this.events.jamFactorAt(this.rider.pos);
+    this.mods.jamNow = this.rider.onSidewalk ? 1 : this.events.jamFactorAt(this.rider.pos);
     this.events.update(dt);
+
+    // 新手引导：第一次出现报价 / 第一次进规划
+    if (this.orders.offers.length && !this.hintFlags.has('offer')) this.hint('offer', '📡 来单了！按 Enter 接单', 5);
+    if (this.rider.battery < 30) this.hint('battery', '🪫 电量低！去小地图绿色 ⚡ 充电点闪充', 6);
 
     if (this.input.justPressed('Enter') && this.orders.offers.length) this.enterPlanIfAccepted();
     if (this.input.justPressed('KeyE')) {
@@ -261,9 +296,12 @@ export class Game {
           const tip = this.events.onDelivery();
           this.money += res.pay + tip;
           this.hud.toast(`+¥${(res.pay + tip).toFixed(1)} ${res.onTime ? '准时送达！' : '超时…'}${res.combo ? ' 🧲连击' : ''}`);
+          this.particles.spawn(res.order.deliverPos.x, 3, res.order.deliverPos.z, { count: 42, color: 0x7dffb2, speed: 9, up: 9, life: 0.9 });
           this.difficulty.record((res.order.limitSec - Math.max(0, res.order.remainSec)) / res.order.limitSec);
           this.orders.slackScale = this.difficulty.slackScale;
           this.knowledge.check(this);
+        } else if (res.kind === 'pickup') {
+          this.particles.spawn(res.order.pickupPos.x, 3, res.order.pickupPos.z, { count: 24, color: 0xffd166, speed: 7, up: 7, life: 0.7 });
         }
         this.replan();
       }
@@ -280,10 +318,33 @@ export class Game {
     const odo0 = this.rider.odoM;
     this.rider.update(dt, {
       input: this.input, colliders: this.city.colliders, bounds: this.city.bounds,
-      audio: this.audio, mods: this.mods,
+      audio: this.audio, mods: this.mods, ramps: this.city.ramps, isSidewalk: isSidewalkPos,
     });
     this.odoDayM += this.rider.odoM - odo0;
     this.orders.update(dt, dtGameSec, this.workday.isPeak);
+
+    // 粒子：冲刺尾焰 / 碰撞火花 / 落地尘土 / 雨丝
+    this.trailT -= dt;
+    if (this.rider.boosting && this.trailT <= 0) {
+      this.trailT = 0.03;
+      const back = this.rider.forward();
+      this.particles.spawn(this.rider.pos.x - back.x * 2, 1, this.rider.pos.z - back.z * 2,
+        { count: 3, color: 0x00e5ff, speed: 2, up: 1.5, life: 0.4, spread: 0.6 });
+    }
+    if (this.rider.justCrashed) {
+      this.shake = 0.7;
+      this.particles.spawn(this.rider.pos.x, 1.5, this.rider.pos.z, { count: 26, color: 0xffa94d, speed: 8, up: 6, life: 0.6 });
+    }
+    if (this.rider.justLanded) {
+      this.shake = 0.5;
+      this.particles.spawn(this.rider.pos.x, 0.5, this.rider.pos.z, { count: 20, color: 0x9d7dff, speed: 6, up: 3, life: 0.5 });
+    }
+    if (this.events.active.some((a) => a.def.id === 'rain')) {
+      for (let i = 0; i < 4; i++)
+        this.particles.spawn(this.rider.pos.x + (Math.random() - 0.5) * 50, 18, this.rider.pos.z + (Math.random() - 0.5) * 50,
+          { count: 1, color: 0x4dc3ff, speed: 0.2, up: -26, life: 0.75, spread: 0 });
+    }
+    this.particles.update(dt);
 
     if (this.plan.stops.length && this.rider.pos.distanceTo(this.lastReplanPos) > 18) this.replan();
 
@@ -367,6 +428,11 @@ export class Game {
       camBlend: () => +g.camBlend.toFixed(2),
       odoKm: () => +(g.odoDayM / 1000).toFixed(2),
       skipLayoff: () => g.layoff?.advance() ?? undefined,
+      // M5
+      ramps: () => g.city.ramps.map((r) => ({ x: r.x, z: r.z, dirX: r.dirX, dirZ: r.dirZ })),
+      riderY: () => ({ y: +g.rider.y.toFixed(2), airborne: g.rider.airborne, onSidewalk: g.rider.onSidewalk }),
+      particles: () => g.particles.count(),
+      hintText: () => document.getElementById('hud-hint')?.textContent || '',
     };
   }
 }

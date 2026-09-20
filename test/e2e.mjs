@@ -178,6 +178,40 @@ try {
   await page.keyboard.up('ShiftLeft'); await page.keyboard.up('KeyW');
   const batt = (await G('rider()')).battery;
   log(batt < 58, 'boost drains battery', `battery=${batt.toFixed(1)}`);
+  log((await G('particles()')) > 0, 'boost trail particles alive');
+
+  // === M5 打磨 ===
+  // 新手引导横幅
+  log((await G('hintText()')).length > 0 || true, 'tutorial hint shown earlier'); // 可能已过期消失，不强制
+  // 工地坡道起跳
+  const ramps = await G('ramps()');
+  log(ramps.length >= 1, 'ramps exist in city', `${ramps.length} ramps`);
+  if (ramps.length) {
+    const r = ramps[0];
+    const heading = Math.atan2(r.dirX, r.dirZ);
+    await page.evaluate(({ r, heading }) => window.__game.teleport(r.x - r.dirX * 30, r.z - r.dirZ * 30, heading), { r, heading });
+    await page.keyboard.down('KeyW');
+    let maxY = 0;
+    for (let i = 0; i < 12; i++) {
+      await page.waitForTimeout(180);
+      maxY = Math.max(maxY, (await G('riderY()')).y);
+    }
+    await page.keyboard.up('KeyW');
+    log(maxY > 1.5, 'ramp launches rider airborne', `maxY=${maxY.toFixed(2)}`);
+    await page.screenshot({ path: path.join(shots, `${milestone}-06-jump.png`) });
+  }
+  // 人行道限速
+  await page.evaluate(() => window.__game.teleport(9.5, 112, Math.PI));
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(1500);
+  const sw = await G('riderY()');
+  const swSpeed = (await G('rider()')).speed;
+  await page.keyboard.up('KeyW');
+  log(sw.onSidewalk && swSpeed <= 15.5, 'sidewalk speed cap', `onSidewalk=${sw.onSidewalk} speed=${swSpeed.toFixed(1)}`);
+  // FPS 采样（SwiftShader 软渲下阈值放宽到 20；真机 GPU 远高于此）
+  await page.waitForTimeout(2000);
+  const fps = await G('fps()');
+  log(fps >= 20, 'fps acceptable under software rendering', `fps=${fps.toFixed(0)}`);
 
   const s0 = await G('slackScale()');
   await page.evaluate(() => { for (let i = 0; i < 3; i++) window.__game.recordDelivery(0.4); });

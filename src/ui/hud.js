@@ -12,6 +12,7 @@ export class HUD {
       <div id="hud-orders" class="hud-panel"><b>进行中订单</b><div id="hud-order-list"><div style="color:#5b7a94">暂无，按 Enter 接单</div></div></div>
       <div id="hud-offers" class="hud-panel"><b>📡 订单推送</b><div id="hud-offer-list"></div></div>
       <div id="hud-prompt" class="hud-panel"></div>
+      <div id="hud-hint" style="position:absolute;top:64px;left:50%;transform:translateX(-50%);padding:8px 20px;display:none;font-size:15px;color:#ffd166;" class="hud-panel"></div>
       <div id="hud-speed" class="hud-panel"><span id="hud-speed-v">0</span> <small>km/h</small></div>`;
     this.el = {
       time: document.getElementById('hud-time'),
@@ -26,6 +27,7 @@ export class HUD {
       peak: document.getElementById('hud-peak'),
       know: document.getElementById('hud-know'),
       events: document.getElementById('hud-events'),
+      hint: document.getElementById('hud-hint'),
     };
     this.lastKey = '';
   }
@@ -82,6 +84,13 @@ export class HUD {
     if (performance.now() < (this.toastUntil || 0)) return; // toast 优先
     this.el.prompt.style.display = text ? 'block' : 'none';
     if (text) this.el.prompt.textContent = text;
+  }
+
+  hint(text, dur = 5) { // 新手引导横幅
+    this.el.hint.style.display = 'block';
+    this.el.hint.textContent = text;
+    clearTimeout(this._hintT);
+    this._hintT = setTimeout(() => { this.el.hint.style.display = 'none'; }, dur * 1000);
   }
 
   toast(text, color = '#7dffb2') { // 简版中央提示，2秒消失
