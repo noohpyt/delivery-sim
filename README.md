@@ -57,4 +57,8 @@ node test/e2e.mjs m6 dist # 对构建产物跑同一套全流程（vite preview 
 - `knowledge.js` — 知识锁条件
 - `story.js` — 开场决策卡与文案
 
+## License
+
+本项目采用 GNU General Public License v3.0（GPL-3.0）授权。详见 [LICENSE](./LICENSE) 文件。
+
 
