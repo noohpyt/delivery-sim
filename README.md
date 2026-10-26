@@ -2,8 +2,6 @@
 
 赛博朋克城市里的机器人骑手模拟器。你曾是设计派单算法的产品经理，被裁员后成为骑手，亲身体验被你压缩到极限的配送时限。
 
-**技术栈**：three.js + Vite + 原生 JS（ES Modules），无重型框架。美术全部程序化生成（低多边形 + 霓虹），音效由 WebAudio 实时合成，零外部素材。
-
 ## 运行
 
 ```bash
@@ -59,17 +57,4 @@ node test/e2e.mjs m6 dist # 对构建产物跑同一套全流程（vite preview 
 - `knowledge.js` — 知识锁条件
 - `story.js` — 开场决策卡与文案
 
-## 代码结构
 
-```
-src/
-  core/      游戏主控、输入、音效、随机数
-  world/     程序化城市、昼夜光照
-  entities/  骑手（驾驶/电池/跳跃）
-  systems/   订单、路网寻路、工作日、事件、知识、难度、PM开场
-  ui/        HUD、小地图、规划界面、全屏界面
-  fx/        粒子
-  config/    全部数值与数据
-test/e2e.mjs Playwright 全流程回归（驾驶/接单/规划/事件/日结/异常）
-docs/        design.md / plan.md / decisions.md / progress.md（里程碑验收）
-```
